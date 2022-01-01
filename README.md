@@ -1,2 +1,0 @@
-# BDP
-Bazy danych przestrzennych
