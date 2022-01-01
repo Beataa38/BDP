@@ -1,0 +1,127 @@
+#!/bin/bash
+
+#21/12/2021
+#skrypt pobierający z internetu dane, rozpakowywujący je, sprawdzający poprawność pliku, tworzący tabelę w bazie danych wstawiając do niej dane z pliku, przenoszący plik do podkatalogu, wysyłający mail z raportem, uruchamiający kwerendy sql, eksportujący zawartość tabeli do pliku csv, kompresujący csv, wysyłający mail z csv oraz zapisujący wykonanie poszczególnych kroków
+
+#pobranie pliku ze strony
+nazwa='Customers_Nov2021.zip'
+url='https://home.agh.edu.pl/~wsarlej/Customers_Nov2021.zip'
+nazwalog='skrypt'
+wget -O $nazwa $url
+if [ $? -eq 0 ]
+then echo "`date +%Y%m%d%H%M%S` - pobieranie pliku - sukces" 1> $nazwalog.log
+else echo "`date +%Y%m%d%H%M%S` - pobieranie pliku - niepowodzenie" 1> $nazwalog.log
+fi
+
+#rozapakowanie pliku zip
+haslo='agh'
+unzip -P $haslo $nazwa
+if [ $? -eq 0 ]
+then echo "`date +%Y%m%d%H%M%S` - rozpakowanie pliku zip - sukces" 1>> $nazwalog.log
+else echo "`date +%Y%m%d%H%M%S` - rozpakowanie pliku zip - niepowodzenie" 1>> $nazwalog.log
+fi
+
+timestamp=`date +%m%d%Y`
+
+#sprawdzenie poprawności pliku
+wiersze_pob=`wc -l Customers_Nov2021.csv | cut -f1 -d " "`
+awk NF Customers_Nov2021.csv 1> temp.txt
+#wc -l temp.txt
+sed -i "1d" temp.txt
+#sed -i "1d" Customers_old.csv 	#jednorazowe do wycięcia nagłówków
+sort temp.txt 1> nowe.txt
+#wc -l nowe.txt
+sort Customers_old.csv 1> old.txt
+#wc -l old.txt
+echo "first_name,last_name,email,lat,long" 1> Customers_Nov2021.bad_$timestamp.csv
+comm -12 nowe.txt old.txt 1>> Customers_Nov2021.bad_$timestamp.csv
+if [ $? -eq 0 ]
+then echo "`date +%Y%m%d%H%M%S` - odfiltrowanie powtarzających się wierszy - sukces" 1>> $nazwalog.log
+else echo "`date +%Y%m%d%H%M%S` - odfiltrowanie powtarzających się wierszy - niepowodzenie" 1>> $nazwalog.log
+fi
+echo "first_name,last_name,email,lat,long" 1> Customers_Nov2021.csv
+comm -23 nowe.txt old.txt 1>> Customers_Nov2021.csv
+if [ $? -eq 0 ]
+then echo "`date +%Y%m%d%H%M%S` - odfiltrowanie właściwych wierszy - sukces" 1>> $nazwalog.log
+else echo "`date +%Y%m%d%H%M%S` - odflitrowanie właściwych wierszy - niepowodzenie" 1>> $nazwalog.log
+fi
+duplikaty=`sed "1d" Customers_Nov2021.bad_$timestamp.csv | wc -l | cut -f1 -d " "`
+wiersze_pop=`sed "1d" Customers_Nov2021.csv | wc -l | cut -f1 -d " "`
+rm temp.txt
+rm nowe.txt
+rm old.txt
+
+#utworzenie tabeli w bazie, załadowanie danych do tabeli
+numerindeksu='290720'
+hostname=localhost
+username=postgres
+port='5432'
+database=postgres
+haslob='postgres'
+cat Customers_Nov2021.csv > temp.txt
+sed -i "1d" temp.txt 
+ PGPASSWORD=$haslob psql -h $hostname -p $port -U $username -d $database \
+	 -c "DROP TABLE CUSTOMERS_$numerindeksu" \
+	 -c "CREATE TABLE IF NOT EXISTS CUSTOMERS_$numerindeksu(first_name varchar(15), last_name varchar(15), email varchar(40), lat float(24), long float(24))" \
+	 -c "COPY CUSTOMERS_$numerindeksu(first_name, last_name, email, lat, long) FROM '/mnt/wsl/temp.txt' DELIMITER ',';" 1> not.txt	#drop table w celach testowych, aby nie dopisywały dane się wielokrotnie
+if [ $? -eq 0 ]
+then echo "`date +%Y%m%d%H%M%S` - utworzenie tabeli w bazie z danymi csv - sukces" 1>> $nazwalog.log
+else echo "`date +%Y%m%d%H%M%S` - utworzenie tabeli w bazie z danymi csv - niepowodzenie" 1>> $nazwalog.log
+fi
+dane_tab=`cat not.txt | sed "1d" | cut -f2 -d " "`
+rm temp.txt
+
+#przeniesienie pliku do katalogu PROCESSED i dodanie prefixu
+if [ ! -d PROCESSED ]
+then mkdir PROCESSED
+else
+	echo "Directory exists" 1> /dev/null
+fi
+mv Customers_Nov2021.csv PROCESSED
+mv PROCESSED/Customers_Nov2021.csv PROCESSED/Customers_Nov2021_$timestamp.csv
+if [ $? -eq 0 ]
+then echo "`date +%Y%m%d%H%M%S` - przeniesienie pliku csv - sukces" 1>> $nazwalog.log
+else echo "`date +%Y%m%d%H%M%S` - przeniesienie pliku csv - niepowodzenie" 1>> $nazwalog.log
+fi
+
+#email z raportem
+adresat='bzwolenik@student.agh.edu.pl'
+echo "Liczba wierszy w pobranym pliku: $wiersze_pob, liczba poprawnych wierszy: $wiersze_pop, liczba duplikatów w pliku wejściowym: $duplikaty, ilość danych załadowanych do tabeli: $dane_tab" | mailx -s "CUSTOMERS LOAD - $timestamp" $adresat #problem z wyjściem wiadomości poza bash linuxa 
+if [ $? -eq 0 ]
+then echo "`date +%Y%m%d%H%M%S` - wysłanie wiadomości email z raportem - sukces" 1>> $nazwalog.log
+else echo "`date +%Y%m%d%H%M%S` - wysłanie wiadomości email z raportem - niepowodzenie" 1>> $nazwalog.log
+fi
+
+#echo $wiersze_pob
+#echo $wiersze_pop
+#echo $duplikaty
+#echo $dane_tab
+
+#kwerenda SQL - klienci w promieniu 50km od punktu, eksport tabeli
+ PGPASSWORD=$haslob psql -h $hostname -p $port -U $username -d $database \
+	 -c "DROP TABLE BEST_CUSTOMERS_$numerindeksu" \
+	 -c "CREATE TABLE IF NOT EXISTS BEST_CUSTOMERS_$numerindeksu(first_name varchar(30), last_name varchar(30))" \
+	 -c "INSERT INTO BEST_CUSTOMERS_$numerindeksu SELECT first_name, last_name FROM CUSTOMERS_$numerindeksu WHERE (SELECT ST_Distance(ST_Point(long, lat), ST_GeomFromText('POINT(41.39988501005976 -75.67329768604034)'))) < 50" \
+ 	-c "COPY BEST_CUSTOMERS_$numerindeksu TO '/mnt/wsl/BEST_CUSTOMERS_$numerindeksu.csv' DELIMITER ',' CSV HEADER;" 1> /dev/null #drop table w celach testowych, aby tabela nie uzupełniała tymi samymi danymi wielokrotnie 
+if [ $? -eq 0 ]
+then echo "`date +%Y%m%d%H%M%S` - wyszukanie klientów i eksport csv w bazie danych - sukces" 1>> $nazwalog.log
+else echo "`date +%Y%m%d%H%M%S` - wyszukanie klientów i eksport csv w bazie danych - niepowodzenie" 1>> $nazwalog.log
+fi
+
+#skompresowanie pliku csv
+zip BEST_CUSTOMERS_$numerindeksu.zip BEST_CUSTOMERS_$numerindeksu.csv 
+if [ $? -eq 0 ]
+then echo "`date +%Y%m%d%H%M%S` - skompresowanie pliku csv - sukces" 1>> $nazwalog.log
+else echo "`date +%Y%m%d%H%M%S` - skompresowanie pliku csv - niepowodzenie" 1>> $nazwalog.log
+fi
+
+#mail z csv
+wiersze_csv=`sed "1d" BEST_CUSTOMERS_$numerindeksu.csv | wc -l | cut -f1 -d " "`
+#echo $wiersze_csv
+echo "Data utworzenia: $timestamp, ilość wierszy: $wiersze_csv" | mailx -a BEST_CUSTOMERS_$numerindeksu.csv -s "BEST_CUSTOMERS - CSV, $timestamp" $adresat  #problem z wyjściem wiadomości poza bash linuxa
+if [ $? -eq 0 ]
+then echo "`date +%Y%m%d%H%M%S` - wysłanie wiadomości email z plikiem csv - sukces" 1>> $nazwalog.log
+else echo "`date +%Y%m%d%H%M%S` - wysłanie wiadomości email z plikiem csv - niepowodzenie" 1>> $nazwalog.log
+fi
+
+
