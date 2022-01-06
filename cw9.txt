@@ -1,0 +1,2 @@
+CREATE TABLE raster AS SELECT ST_UNION(geom) AS geom FROM public."Exports";
+SELECT * FROM raster;
